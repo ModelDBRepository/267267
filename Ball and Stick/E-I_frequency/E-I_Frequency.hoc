@@ -1,0 +1,338 @@
+// Maurice Petroccine, SUNY Albany (mpetroccione@albany.edu)
+// Last updated on 11/19/2021
+
+// This code applies 100 excitatory and inhibitory inputs onto to a ball and stick model and reports the number of action potentials recorded at the soma.
+// The simulation is run for different frequencies of excitatory and inhibitory input.
+// All inputs are random uniform location along the dendrite are active with a frequency discribed by a gaussian distribution around the specified mean value.
+// The timing of the inputs is generated prior to running this code (see premade.hoc)
+// Time step: 0.025 ms
+// Window duration: 50 ms
+// to run type go("FileNameGoesHere") where you substitute what you want to name the file for FileNameGoesHere
+// File will appear in the same folder as the hoc file after it is done (make sure simulation is finished before opening)
+// Necessary files needed to run: 
+
+load_file ("nrngui.hoc")
+load_file ("ranstream.hoc")
+model_type = 1															// choose whether the model should be (1)180 um for WT or (2) 266 um for KO
+dt = 0.025																// time step of integration
+tstop = 1050															// ms, each simulation stops after it reaches 1050 ms
+repetitions = 1															// number of repetitions for each excitatory inhibitory input pair
+strdef preface, dirstr
+preface = "."
+sprint(dirstr, "%s/all_tau_vecs.hoc", preface)
+xopen(dirstr)
+num_excit_step = 5														// set the number of excitatory frequency steps
+num_inhib_step = 5														// set the number of inhibotry frequency steps
+/***** TOPOLOGY *****/
+create soma, dend														// creates soma and a dendrite 
+connect dend(0), soma(1)							
+access dend 															// sets the access to the dendrite	
+
+soma {
+	L = 15																// um, length of the soma
+	diam = 15															// um, diameter of the soma
+	nseg = 1
+}
+if (model_type == 1){
+	dend {
+		L = 180															// um, length of the dendrite, WT = 180 um
+		diam = 2.75														// um, starting diameter of the dendrite	
+		nseg = 51														// # of segments
+		diam(0:1) = 2.75:1												// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+if (model_type == 2){
+	dend {
+		L = 266															// um, length of the dendrite, KO = 266 um
+		diam = 2.75														// um, starting diameter of the dendrite	
+		nseg = 51														// # of segments
+		diam(0:1) = 2.75:1												// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+
+soma {
+	insert caL
+		 pbar_caL = 0.0001
+	insert caL13
+		pcaLbar_caL13 = 0.0001
+	insert kas
+		gkbar_kas = 0.00025
+	insert kir
+		gkbar_kir = 0.00025
+		qfact_kir = 1
+	insert krp
+		gkbar_krp = 0.002
+	insert nap
+		gnabar_nap = 0.0001325
+	insert caldyn
+	insert na3
+		gbar_na3 = 0.035
+	insert kdr
+		gkdrbar_kdr = 0.03
+	insert cadyn
+	insert pas	
+		g_pas = 0.95e-4
+		e_pas = -65
+	celsius = 23
+	ek = -80	
+	ena = 65
+	ecal = 118
+	Ra = 100																// Ohm-cm
+	cm = 1																	// uF/cm2	
+}		
+
+dend {
+	insert kdr
+		gkdrbar_kdr = 0.003
+	insert caL
+		 pbar_caL = 1e-5
+	insert caL13
+		pcaLbar_caL13 = 1e-5
+	insert kas
+		gkbar_kas = 0.000025
+	insert kir
+		gkbar_kir = 0.00025
+		qfact_kir = 1
+	insert krp
+		gkbar_krp =  0.0002
+	insert pas
+		g_pas = 0.95e-4
+		e_pas = -65
+		ek = -80
+//		ena = 65
+		ecal =118
+		celsius = 20
+		Ra = 100															// Ohm-cm
+		cm = 2																// uF/cm2
+}
+
+cai0_ca_ion = 0.001															// mM, Churchill & Macvicar (1998)
+cao0_ca_ion = 1.2															// mM, Ca2+ concentration in external solution
+cali0_cal_ion = 0.001														// mM, Churchill & Macvicar (1998)
+calo0_cal_ion = 1.2															// mM, Ca2+ concentration in external solution
+CAINF = 1e-5																// mM, steady state intracell ca conc.
+TAUR = 43																	// ms, time const of ca diffusion - Jackson & Redman (2003)
+CA_DRIVE = 10000
+CA_PUMP = 0.02
+ 
+proc set_cainf() {	NEW_CAINF = $1											// Ca2+ dynamics, from Mattioni
+	nCA_INF = NEW_CAINF
+	forall if (ismembrane("cadyn")) {cainf_cadyn = NEW_CAINF}
+	forall if (ismembrane("caldyn")) {cainf_caldyn = NEW_CAINF}
+}
+proc set_taur() {	NEW_TAUR = $1
+	nCA_TAUR = NEW_TAUR
+	forall if (ismembrane("cadyn")) {taur_cadyn = NEW_TAUR}
+	forall if (ismembrane("caldyn")) {taur_caldyn = NEW_TAUR}
+}
+proc set_cadrive() { 	NEW_DRIVE = $1
+	nCA_DRIVE = NEW_DRIVE
+	forall if (ismembrane("cadyn")) {drive_cadyn = NEW_DRIVE}
+	forall if (ismembrane("caldyn")) {drive_caldyn = NEW_DRIVE}
+}
+proc set_pump() {	NEW_PUMP = $1
+	nCA_PUMP = NEW_PUMP
+	forall if (ismembrane("cadyn")) {pump_cadyn = NEW_PUMP}
+	forall if (ismembrane("caldyn")) {pump_caldyn = NEW_PUMP}
+}
+
+celsius = 23																// recordings took place at room temperature
+ek = -80																	// potassium reversal potential
+v_init = -71.5																// initial voltage
+
+ISI = 10 																	// default NetStim parameters - will be overwritten
+NUM = 220
+START = 50
+NOISE = 0
+
+/***** INSTRUMENTATION *****/
+objref syn_ampa[NUM], syn_nmda[NUM], ns, syn_gaba[NUM]
+
+objref r2, vec																// creates objects for assigning random placement of the input location
+r2 = new Random(11021986)							
+vec = new Vector(1000)
+
+proc setlocation() { local i												// procedure for generating a random location for the inputs 
+	r2 = new Random(11021986*(repetitions*l+z))								// change the seed of the RNG for each run
+	r2.uniform(0.001, 0.999)												// generate values between 0.001 and 0.999 with a uniform distribution
+	vec.setrand(r2)
+	for i = 0, NUM-1 {														// set the dendritic location of the excitatory inputs based on these generated values
+		dend syn_nmda[i] = new NMDA(vec.x[i])
+		dend syn_ampa[i] = new AMPA(vec.x[i])
+	}
+	r2.repick																// repick the from the set of random numbers
+	vec.setrand(r2)
+	for i = 0, NUM-1 {														// set the dendritic location of the inhibitory inputs based on these generated values
+		dend syn_gaba[i] = new GABA(vec.x[i])
+	}
+}
+
+objref  nc[NUM], nc2[NUM], nc3[NUM]
+
+objref tvec, tvec2, nil
+objref  tvec, fvec
+
+fvec = new File()															// object for opening pre-generated lists of input times
+tvec = new Vector()															// vector for transfering excitatory stimulation times
+tvec2 = new Vector ()														// vector for transfering ihibitory stimulation times
+
+objref nsa, nsa2												
+objref nsalist, nsa2list
+nsalist = new List()														// creates list for storing excitatory stimulation times
+nsa2list = new List()														// creates list for storing inhibitory stimulation times
+
+proc makenetstims2() { local i												// procedure to produce netstims to trigger the excitatory inputs
+	nsalist.remove_all()													// clears previously stored values	
+	for i = 0, tvec.size - 1 {
+		nsa = new NetStim()
+		nsalist.append(nsa)
+		nsalist.o(i).interval = ISI											// ISI doesn't matter because there is only 1 stimulus per netstim
+		nsalist.o(i).number = 1												// # of stims per netstim
+		nsalist.o(i).start = tvec.x[i] 										// start time is read from tvec	
+		nsalist.o(i).noise = 0												// no noise
+	}
+}
+
+proc makenetstims3() { local i												// procedure to produce netstims to trigger the inhibitory inputs
+	nsa2list.remove_all()													// clears the inputs from previous runs
+	for i = 0, tvec2.size - 1 {
+		nsa2 = new NetStim()
+		nsa2list.append(nsa2)
+		nsa2list.o(i).interval = ISI										// ISI doesn't matter because there is only 1 stimulus per netstim
+		nsa2list.o(i).number = 1											// # of stims per netstim
+		nsa2list.o(i).start = tvec2.x[i] 									// start time is read from tvec2
+		nsa2list.o(i).noise = 0												// no noise
+	}
+}
+
+proc instrumentation() { local i											// creates netcons to link AMPA and NMDA point processes and set their weight
+	for i = 0,nsalist.count()-1 {
+		if (model_type == 1){
+			nc[i] = new NetCon(nsalist.o(i), syn_ampa[i])					// sets the weight to WT values for AMPA and NMDA inputs
+				nc[i].weight = 0.84744
+				nc[i].delay = 0
+			nc2[i] = new NetCon(nsalist.o(i), syn_nmda[i])					// 
+				nc2[i].weight = 0.56
+				nc2[i].delay = 0
+		}
+		if (model_type == 2){
+			nc[i] = new NetCon(nsalist.o(i), syn_ampa[i])					// sets the weight to KO values for AMPA and NMDA inputs
+				nc[i].weight = 0.84744
+				nc[i].delay = 0
+			nc2[i] = new NetCon(nsalist.o(i), syn_nmda[i])					// 
+				nc2[i].weight = 0.56
+				nc2[i].delay = 0	
+		}
+	}
+}
+
+proc instrumentation3() { local i											// creates netcons to link GABA point processes and set their weight
+  for i = 0,nsa2list.count()-1 {
+    nc3[i] = new NetCon(nsa2list.o(i), syn_gaba[i])	
+		nc3[i].weight = 0.171												// sets weight for the GABA inputs
+		nc3[i].delay = 0													// no delay
+	}
+}
+
+objref mobj
+mobj = new Matrix(num_excit_step, num_inhib_step)							// makes a matrix for storing the output of the simulation
+
+objref g																	// create a new graph that displays the voltage at the soma 
+g = new Graph()
+addplot(g,0)
+g.exec_menu("Keep Lines")
+g.size(0,2050,-80,50)
+g.addvar("soma.v(0.5)", 1, 1, 0.6, 0.9, 2)
+
+objref apc																	// creates an object for counting the action potentials at the soma (threshold = 0 mV)
+	soma apc = new APCount(0.5)
+	apc.thresh = 0
+
+objref tfil																	// creates tfil for writing to output file
+	tfil = new File()
+objref ap_vec																// object for storing AP count
+objref tfil2																// creates tfil2 for writing to output file
+	tfil2 = new File()
+objref ap_vec																// object for storing AP count in matrix
+
+strdef tmpstr																// creates a temporary string for writing the file name
+strdef tmpstr2
+strdef tmpstr3
+strdef ap_name
+	
+proc initialize() {															// Sets model to initial state (time, voltage)
+	t = 0
+	finitialize(v_init)
+	fcurrent()
+}
+u = 0
+proc integrate() {															// moves the simulation forward
+	g.begin()																// and updates the graph
+	while (t<tstop) {
+		fadvance()
+		g.plot(t)
+	}	
+	g.flush()
+}
+ap_vec = new Vector()
+proc go() {																	// the run command - note: does not work without have the access set to the dendrite
+	for m = 1,num_excit_step {
+		for l = 1,num_inhib_step { 
+			for z = 0,repetitions-1 {
+				sprint(tmpstr2, "WT%dHZ_ex_times_%d.dat", (m*5), z+1)		// selects the pregenerated file of random excitatory onset times
+				fvec.ropen(tmpstr2)											// opens file of random onset times		
+				tvec.scanf(fvec)											// scans these values into tvec
+				
+				sprint(tmpstr3, "WT%dHZ_inhib_times_%d.dat",  (l*5), z+1)	// selects the pregenerated file of random inhibitory onset times
+				fvec.ropen(tmpstr3)											// opens file of random onset times	
+				tvec2.scanf(fvec)											// scans these values into tvec2
+					
+				setlocation()												// procedure to place inputs randomly throughout the dendrite
+				makenetstims2(100)											// procedure to set the timing of excitatory inputs
+				makenetstims3(100)											// procedure to set the timing of inhibitory inputs
+				instrumentation()											// procedure to set the weight of excitatory inputs	
+				instrumentation3()											// procedure to set the weight of inhibitory inputs
+				start_sim()													// starts the simulation
+				ap_vec.append(apc.n)										// records AP count to ap_vec
+				print u
+				u = u+1
+				}
+			sprint(tmpstr, "%s%dHZ_ex_%dHZ_inhib.dat", $s1, (m*5),(l*5))		// creates a string to name the file
+			tfil.wopen(tmpstr)												// opens the output file
+			xytofile(ap_vec, tmpstr)										// procedure to write the number of APs to the output file
+			tfil.close()													// closes the ouput file
+			mobj.x[m][l] = ap_vec.mean
+			z = 0
+			ap_vec.resize(0)												// resizes ap_vec to 0 removing previous values
+		}
+	}
+
+	matrixtofile(mobj, "matrix_output.dat")
+	
+}
+
+proc start_sim() {									
+	initialize()															// initialize the individual simulation	
+	integrate()																// run the individual simulation
+}
+
+proc xytofile() { local b													// procedure to write the number of action potentials to a file and name the file
+  w=0
+  print "writing to ", $s2													// notifies when writing to file
+  ap_label(nsalist.o(1).interval)
+  tfil.printf("\n%s\n", ap_name)
+  for b=0,$o1.size()-1 {tfil.printf("%g\n", ap_vec.x[b])}
+  tfil.printf("MEAN AP COUNT\n%g", ap_vec.mean())
+ }
+
+proc matrixtofile() { local b												// procedure to write the number of action potentials to a file and name the file
+  w=0
+  print "writing to ", $s2	
+	tfil2.wopen("matrix_output.dat")										 // notifies when writing to file
+	mobj.fprint(tfil2)
+	tfil2.close()
+ }
+ 
+ proc ap_label (){															// procedure for creating the file lable for the current iteration
+	sprint(ap_name, "APCount\t%g", $1)
+}

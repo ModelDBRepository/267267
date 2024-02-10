@@ -1,0 +1,278 @@
+// Maurice Petroccine, SUNY Albany (mpetroccione@albany.edu)
+// Last updated on 11/15/2021
+
+// This is a ball and stick model in which a 15 um diameter soma is connected to a 180 um (WT) or 266 um (KO) long dendrite.
+// The dendrite receives two inputs.
+// The first input occurs at increasing distances from the soma (0.001<dist<0.999).
+// The second input is either located halfway between the first stimulus and the most distal end of the dendrite (prox_first) or halfway between the first stimulus and the soma (dist_first). 
+// Time step: 0.025 ms
+// This code should record the maximum voltage reached during each iteration of the simulation and ouput these values in a dat file
+// to run type go("FileNameGoesHere") where you substitute what you want to name the file for FileNameGoesHere
+// File will appear in the same folder as the hoc file after it is done (make sure simulation is finished before opening)
+
+load_file ("nrngui.hoc")
+model_type = WT										// chose whether the model should be 180 um (WT) or 266 um (KO)
+stim_order = prox_first								// chose whether the stimulation is proximal to the soma first (prox_first) or distal first (dist_first)
+stimtime = 20										// time between stimulation 
+num_t_step = 50										// the number times to increment the inter-input interval
+num_d_step = 50										// the number of points along the axon
+timeoffset = 5										// the amount to increment the interstumulus interval by between each simulation
+dt = 0.025											// time step of integration
+tstop = 1000										// ms, each simulation stops after it reaches 1000 ms
+
+strdef preface, dirstr
+preface = "."
+
+sprint(dirstr, "%s/all_tau_vecs.hoc", preface)
+xopen(dirstr)
+
+// Topology
+create soma, dend
+connect dend(0), soma(1)
+access dend 
+
+soma {												// creates soma and a dendrite 
+	L = 15											// um, length of the soma
+	diam = 15										// um, diameter of the some
+	nseg = 1
+}
+if (model_type == WT){
+	dend {
+		L = 180										// um, length of the dendrite, WT = 180 um
+		diam = 2.75									// um, starting diameter of the dendrite	
+		nseg = 51									// # of segments
+		diam(0:1) = 2.75:1							// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+if (model_type == WT){
+	dend {
+		L = 266										// um, length of the dendrite, KO = 266 um
+		diam = 2.75									// um, starting diameter of the dendrite	
+		nseg = 51									// # of segments
+		diam(0:1) = 2.75:1							// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+
+// Biophysics
+
+soma {
+	insert caL
+		 pbar_caL = 0.0001
+	insert caL13
+		pcaLbar_caL13 = 0.0001
+	insert kas
+		gkbar_kas = 0.00025
+	insert kir
+		gkbar_kir = 0.00025
+		qfact_kir = 1
+	insert krp
+		gkbar_krp = 0.002
+	insert nap
+		gnabar_nap = 0.0001325
+	insert caldyn
+	insert na3
+		gbar_na3 = 0.035
+	insert kdr
+		gkdrbar_kdr = 0.03
+	insert cadyn
+	insert pas	
+		g_pas = 0.95e-4
+		e_pas = -65
+		ek = -80	
+		ena = 65
+		ecal =118
+	Ra = 100										// Ohm-cm
+	cm = 1											// uF/cm2
+}		
+
+dend {
+	insert kdr
+		gkdrbar_kdr = 0.003
+	insert caL
+		 pbar_caL = 1e-5
+	insert caL13
+		pcaLbar_caL13 = 1e-5
+	insert kas
+		gkbar_kas = 0.000025
+	insert kir
+		gkbar_kir = 0.00025
+		qfact_kir = 1
+	insert krp
+		gkbar_krp =  0.0002
+	insert pas
+		g_pas = 0.95e-4
+		e_pas = -65
+		ek = -80
+		ecal =118								
+	Ra = 100										// Ohm-cm
+	cm = 2											// uF/cm2
+}
+
+celsius = 23										// recordings took place at room temperature
+ena = 65											// sodium reversal potential
+ek = -80											// potassium reversal potential
+v_init = -71.5										// initial voltage
+													// Ca2+ concentrations and dynamics, from Mattioni
+cai0_ca_ion = 0.001									// mM, Churchill 1998
+cao0_ca_ion = 1.2									// mM, Ca2+ concentration in external solution
+cali0_cal_ion = 0.001								// mM, Churchill 1998
+calo0_cal_ion = 1.2									// mM, Ca2+ concentration in external solution
+CAINF = 1e-5										// mM, steady state intracell ca conc.
+TAUR = 43											// ms, time const of ca diffusion - Jackson 2003
+CA_DRIVE = 10000
+CA_PUMP = 0.02
+
+proc set_cainf() {	NEW_CAINF = $1					//Ca2+ dynamics, from Mattioni
+	nCA_INF = NEW_CAINF
+	forall if (ismembrane("cadyn")) {cainf_cadyn = NEW_CAINF}
+	forall if (ismembrane("caldyn")) {cainf_caldyn = NEW_CAINF}
+}
+
+proc set_taur() {	NEW_TAUR = $1
+	nCA_TAUR = NEW_TAUR
+	forall if (ismembrane("cadyn")) {taur_cadyn = NEW_TAUR}
+	forall if (ismembrane("caldyn")) {taur_caldyn = NEW_TAUR}
+}
+proc set_cadrive() { 	NEW_DRIVE = $1
+	nCA_DRIVE = NEW_DRIVE
+	forall if (ismembrane("cadyn")) {drive_cadyn = NEW_DRIVE}
+	forall if (ismembrane("caldyn")) {drive_caldyn = NEW_DRIVE}
+}
+proc set_pump() {	NEW_PUMP = $1
+	nCA_PUMP = NEW_PUMP
+	forall if (ismembrane("cadyn")) {pump_cadyn = NEW_PUMP}
+	forall if (ismembrane("caldyn")) {pump_caldyn = NEW_PUMP}
+}
+
+// Instrumentation
+objref syn_gaba, syn2_gaba, ns, ns2, nc, nc3
+
+	ns = new NetStim(0.5)							// creates a netstim to trigger the first input
+		ns.interval = 1
+		ns.start = stimtime
+		ns.noise = 0
+		ns.number = 1
+	
+	ns2 = new NetStim(0.5)							// creates a netstim to trigger the second input
+		ns2.interval = 1
+		ns2.start = stimtime
+		ns2.noise = 0
+		ns2.number = 1
+
+	dend syn_gaba = new GABA(0.1)					//Creates two point-processes on the dendrite (2 GABA inputs)					
+	dend syn2_gaba = new GABA(0.1)
+	
+	nc = new NetCon(ns, syn_gaba)					// creates a netcon linking the GABA input to the to the first netstim
+	nc.weight = 0.66
+	nc.delay = 0
+
+	nc3 = new NetCon(ns, syn2_gaba)					// creates a netcon linking the GABA input to the to the second netstim
+	nc3.weight = 0.66
+	nc3.delay = 0	
+
+// Graphical display 
+objref g											// create a new graph that displays the voltage at the soma 
+g = new Graph()
+addplot(g,0)
+g.exec_menu("Keep Lines")
+g.size(0,50,-80,40)
+g.addvar("soma.v(0.5)", 1, 1, 0.6, 0.9, 2)
+//g.addvar("dend.v(0.7)", 2, 1, 0.6, 0.9, 2)
+//g.addvar("dend.v(0.1)", 3, 1, 0.6, 0.9, 2)
+
+// Sim control
+
+v_init = -71.5										// intital voltage			
+
+objref  recVm										// creates vector object, records V at soma
+	recVm = new Vector()
+	recVm.record(&soma.v(0.5))
+
+objref vChange										// creates a vector one for keeping track of min V at soma per sweep
+	vChange = new Vector(101,0)						// vector length is set to 100
+
+objref diststep										
+	diststep = new Vector(101)						// used for plotting vMin vs the distance
+	diststep.indgen(0,1,0.01)						
+
+objref distdrop										// creates a new graph - later used to plot V vs Dist
+	distdrop = new Graph()
+	distdrop.size(0,1,-70,50)						// SCALE OF GRAPH IS WRONG ****FIX******
+	distdrop.exec_menu("Keep Lines")				
+
+objref vMin_list [num_t_step]						// creates an object for storing the list of Vmin from of each sweep
+objref vMin [num_t_step]							// creates an object for calculating Vmin
+
+objref tfil											// creates tfil for writing to file
+	tfil = new File()
+	
+strdef tmpstr										// creates a temporary string for writing the file name
+strdef tstepname									// creates a temporary string for writing the tstep name
+	
+proc initialize() {									// Sets model to initial state (time, voltage)
+	t = 0
+	finitialize(v_init)
+	fcurrent()
+}
+
+proc integrate() {									// moves the simulation forward
+	g.begin()										// and updates the graph
+	while (t<tstop) {
+		fadvance()
+		g.plot(t)
+	}	
+	g.flush()
+}
+
+proc go() {											// the run command - note: does not work without have the access set to the dendrite
+	sprint(tmpstr, "%s.dat", $s1)					// creates a string for the output file name based on what is written when the simulation is run
+	tfil.wopen(tmpstr)								// opens that file 
+	for z = 0,(num_t_step-1) {						// runs simulations for the num_t_steps			
+		vMin_list[z] = new Vector()					// sets vMin_list and vMin to be vectors
+		vMin[z] = new Vector (101,0)
+		j=0											
+		nc3.delay= (timeoffset*z)					// sets the offset of the second input to increment by "timeoffset"
+		change_dist()								// runs "change_dist" procedure to run the simulation at each point along the dendrite
+		vMin[z].line(distdrop, diststep)			// prints the vMin to the graph
+		print z										// this prints an update every 100 loops - comment out to run faster simulations
+	}
+	xytofile(vMin_list[w], tmpstr)					// procedure to write vMin to a file
+	tfil.close()									// closes the file
+}
+
+proc change_dist() {								// loop to run the simulation at each point along the dendrite 
+	for i = 0,(num_d_step-1) {						// loops for the specified number of distance steps
+		if (j==0){									// avoids placing the inputs at postion 0 on the dendrite
+			j=0.001
+		}
+		if (j==1){									// avoids placing the inputs at postion 0 on the dendrite
+			j=0.999
+		}
+		syn_gaba.loc(j)								// changes the first input location
+		if (stim_order == prox_first) {				// places the second input halfway between the first input and the distal tip of the dendrite 
+			syn2_gaba.loc(((1-j)/2)+j)					
+		} else if (stim_order == dist_first) {		// places the second input halfway between the first input and the soma
+			syn2_gaba.loc(j/2)
+		} else {									// error message if incorrect settings are selected
+			print "no stimulation order selected - please enter and run again"
+		}
+	initialize()									// initialize the individual simulation	
+	integrate()										// run the individual simulation
+	vMin[z].x[i] = recVm.min()						// records the most depolarized voltage experienced at the soma to vMin
+	vMin_list[z].append(vMin[z].x[i])				// appends the peak potential to vector "vMin_list"
+	j=j+(1/num_d_step)								// moves the input down the axon by an amount = 1/dstep				
+	}
+}
+
+proc xytofile() { local b							// procedure to write the number of action potentials to a file and name the file
+  w=0
+  print "writing to ", $s2							// notifies when writing to file
+  for w=0,num_t_step-1 {
+	tsteplabel(w+1)
+  tfil.printf("\n%s\n", tstepname)					// prints the specific time step and then the list of vMin values ordered by distance from the soma
+  for b=0,$o1.size()-1 tfil.printf("%g\n", vMin_list[w].x[b])}
+ }
+ 
+ proc tsteplabel (){								// procedure for creating the file lable for the tstep iteration
+	sprint(tstepname, "tstep\t%g", $1)
+	}

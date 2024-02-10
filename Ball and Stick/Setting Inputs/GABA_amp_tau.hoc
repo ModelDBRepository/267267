@@ -1,0 +1,299 @@
+// Maurice Petroccine, SUNY Albany (mpetroccione@albany.edu)
+// Last updated on 11/19/2021
+
+// This code applies a single (GABA) input to the dendrite of a ball and stick model and records the peak amplitude and t50 of the EPSC recorded from the soma.
+// A simulation is run for each segment of the dendrite while systematically varying the weight and tau of the GABA input.
+// Time step: 0.025 ms
+// Window duration: 400 ms
+// to run type go("FileNameGoesHere") where you substitute what you want to name the file for FileNameGoesHere
+// File will appear in the same folder as the hoc file after it is done (make sure simulation is finished before opening)
+// Necessary files needed to run: 
+
+model_type = 1																// choose whether the model should be WT (1) or KO (2)
+dt = 0.025																	// time step of integration
+tstop = 1050																// ms, each simulation stops after it reaches 1050 ms
+repetitions = 10															// number of simulations for each frequncy pairing to run
+strdef preface, dirstr
+preface = "."
+sprint(dirstr, "%s/all_tau_vecs.hoc", preface)
+xopen(dirstr)
+num_tau_steps = 20 															// the number of steps to increment A1 and tau
+num_g_step = 20
+num_d_step = 5																// the number of points along the axon
+wGABA = 0.1																	// the initial weight of the GABA input
+distance_offset = 0			
+
+/***** TOPOLOGY *****/
+create soma, dend
+connect dend(0), soma(1)
+access dend 
+
+soma {																		// creates soma and a dendrite 
+	L = 15																	// um, length of the soma
+	diam = 15																// um, diameter of the some
+	nseg = 1
+}
+if (model_type == 1){														// sets dendrite for WT model	
+	dend {
+		L = 180																// um, length of the dendrite, WT = 180 um
+		diam = 2.75															// um, starting diameter of the dendrite	
+		nseg = 51															// # of segments
+		diam(0:1) = 2.75:1													// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+if (model_type == 2){														// sets dendrite for KO model	
+	dend {
+		L = 266																// um, length of the dendrite, KO = 266 um
+		diam = 2.75															// um, starting diameter of the dendrite	
+		nseg = 51															// # of segments
+		diam(0:1) = 2.75:1													// diameter of dendrite tapers from 2.75 um to 1 um
+	}
+}
+/***** BIOPHYSICS *****/
+forall {
+	Ra = 100																// MOhm, axial resistance
+	cm = 1																	// uF/cm2
+}
+
+soma {																		// inserts conductances into all somatic sections
+	print secname()
+	insert caL																// experimental data obtained using Cs+ based internal solution, therefore all K+ conductances were removed
+	insert caL13									
+		pcaLbar_caL13 = 4.25e-7 
+	insert car
+	insert cat
+	insert naf
+		gnabar_naf = 0.16													// sodium conductances		
+		hshift_naf = 0
+	insert nap
+		gnabar_nap = 0.0005
+	insert caldyn															// inserts calcium dynamics in the soma
+	insert cadyn									
+	celsius = 23															// recordings took place at room temperature
+	ena = 65
+	ecal = 118
+	Ra = 100																// Ohm-cm
+	cm = 1																	// uF/cm2
+}
+dend {																		// inserts conductances in the dendrite - see soma for more info
+	insert naf
+		gnabar_naf = 0.0195
+	insert nap
+		gnabar_nap = 1.38e-7
+	insert caL
+	insert caL13
+		pcaLbar_caL13 = 4.25e-7 
+	insert car
+	insert cat
+	insert caldyn
+	insert cadyn
+	celsius = 23
+	ena = 60
+	ecal =118
+	Ra = 100																// Ohm-cm
+	cm = 2																	// uF/cm2, increased cm (membrane capacitance) to account for spines 
+}
+
+cai0_ca_ion = 0.001															// mM, Churchill & Macvicar (1998)
+cao0_ca_ion = 1.2															// mM, Ca2+ concentration in external solution
+cali0_cal_ion = 0.001														// mM, Churchill & Macvicar (1998)
+calo0_cal_ion = 1.2															// mM, Ca2+ concentration in external solution
+CAINF = 1e-5																// mM, steady state intracellular Ca2+ conc.
+TAUR = 43																	// ms, time const of Ca2+ diffusion - Jackson & Redman (2003)
+CA_DRIVE = 10000
+CA_PUMP = 0.02
+
+proc set_cainf() {	NEW_CAINF = $1											// Ca2+ dynamics, Mattioni & Le Novère (2013)
+	nCA_INF = NEW_CAINF
+	forall if (ismembrane("cadyn")) {cainf_cadyn = NEW_CAINF}
+	forall if (ismembrane("caldyn")) {cainf_caldyn = NEW_CAINF}
+}
+proc set_taur() {	NEW_TAUR = $1
+	nCA_TAUR = NEW_TAUR
+	forall if (ismembrane("cadyn")) {taur_cadyn = NEW_TAUR}
+	forall if (ismembrane("caldyn")) {taur_caldyn = NEW_TAUR}
+}
+proc set_cadrive() { 	NEW_DRIVE = $1
+	nCA_DRIVE = NEW_DRIVE
+	forall if (ismembrane("cadyn")) {drive_cadyn = NEW_DRIVE}
+	forall if (ismembrane("caldyn")) {drive_caldyn = NEW_DRIVE}
+}
+proc set_pump() {	NEW_PUMP = $1
+	nCA_PUMP = NEW_PUMP
+	forall if (ismembrane("cadyn")) {pump_cadyn = NEW_PUMP}
+	forall if (ismembrane("caldyn")) {pump_caldyn = NEW_PUMP}
+}
+
+celsius = 23																// recordings took place at room temperature
+ena = 65																	// sodium reversal potential
+v_init = 40																	// initial voltage
+
+/***** INSTRUMENTATION *****/
+objref voltage_clamp														// creates volatage clamp
+	soma voltage_clamp = new Voltage_Clamp(0.5)								// places svoltage clamp in the soma
+	{voltage_clamp.dur1 = 1000 												// ms, clamp duration
+		voltage_clamp.amp1= 40												// mV, holding potential
+		voltage_clamp.rs= 0.001												// MOhm, series resistance
+	} 
+
+/***** GRAPHICAL DISPLAY *****/
+
+objref g																	// creates a new graph that displays the voltage at the soma 
+g = new Graph()
+addplot(g,0)
+g.exec_menu("Keep Lines")
+g.size(0,2050,-80,50)
+g.addvar("soma.v(0.5)", 1, 1, 0.6, 0.9, 2)
+
+objref g2																	// creates a new graph that plots the holding current
+	g2 = new Graph()
+	addplot(g2,1)
+	g2.exec_menu("Keep Lines")
+	g2.size(0,1000,-80,40)
+	g2.addvar("voltage_clamp.i")
+
+/***** SIM CONTROL *****/									
+
+objref  recI																// Creates vector object, records I at the soma
+	recI = new Vector()
+	recI.record(&voltage_clamp.i)
+
+objref iMax, tMax, iChange, it50, t50										// creates vectors to track:
+	t50 = new Vector (101,0)												// t50	
+	it50 = new Vector (101,0)												// holding current at the time of the t50
+	iMax = new Vector(101,0)												// peak EPSC amplitude (includes holding current)
+	tMax = new Vector(101,0)												// the time of the EPSC peak 
+	iChange = new Vector(101,0)												// the difference between the holding current and the peak EPSC amplitude
+	
+objref diststep										 
+	diststep = new Vector(40000)					
+	diststep.indgen(0,0.025)
+
+objref distdrop																// creates a new graph - later used to plot V vs Dist
+	distdrop = new Graph()
+	distdrop.size(0,200,-1,0)												// SCALE OF GRAPH IS WRONG ****FIX******
+	distdrop.exec_menu("Keep Lines")										// Look into plotting families of lines or vectors. Also how to label 
+
+objref decay_time [num_g_step]												// creates decay_time
+objref maxI [num_g_step]													// creates maxI
+
+objref tfil																	// creates a new file for storing the output data
+	tfil = new File()
+	
+strdef tmpstr
+strdef gstepname
+strdef taustepname
+
+objref syn_gaba, ns2, nc, nc3, nc4, nc2, ns
+
+	ns = new NetStim(0.5)													// creates a netstim to trigger an input that starts at 10 ms
+		ns.interval = 1
+		ns.start = 10
+		ns.noise = 0
+		ns.number = 1
+
+	dend syn_gaba = new GABA(0.1)											// inserts an input (GABA synapse) into the dendrite
+		
+	nc3 = new NetCon(ns, syn_gaba)											// a netcon linking the GABA input to the netstim
+	nc3.weight = 2
+	nc3.delay = 0
+
+objref avgI, tmp	
+avgI = new Vector() 														// discard whatever is already in avg
+tmp = new Vector()
+
+proc initialize() {															// Sets model to initial state (time, voltage)
+	t = 0
+	finitialize(v_init)
+	fcurrent()
+}
+
+proc integrate() {															// moves the simulation forward
+	g2.begin()																// updates the graph
+	while (t<tstop) {
+		fadvance()
+		g2.plot(t)
+	}	
+	g2.flush()
+}
+
+proc go() {																	// the run command - note: does not work without have the access set to the dendrite		
+	sprint(tmpstr, "%s.dat", $s1)											// creates a string for the output file name
+	tfil.wopen(tmpstr)														// opens that file 
+	for z = 0,(num_g_step-1) {												// runs simulations for the num_g_steps
+		decay_time[z] = new Vector()										// creating a string to name a file
+		maxI[z] = new Vector()	
+		tstop = 1050+ z*10													// simulation stops after 1050 ms (10 ms additionally added on per loop)
+		tau_d_GABA = 35.5 * ((z*0.05)+0.05)									// each loop tau for GABA is incremented by 5% of it's initial value
+		setlocation()
+		nc3 = new NetCon(ns, syn_gaba)
+		nc3.weight = 0.28*wGABA												// 0.28 is WT, 0.235 for TBOA-WT, 0.2 for KO, Tau_d_GABA is 35.5 for WT and 17 for KO
+		nc3.delay = 140														// sets delay for input to be 140 msec (to allow voltage clamp to stabilize at +40 mV)
+		changel()									
+		decay_time[z].append(t50.x[z])										// appends t50 to decay_time vector at position z
+		maxI[z].append(iMax.x[z])											// append iMax to maxI vector at position z 
+		print z																// This prints an update every 100 loops - comment out to run faster simulations
+		j = 0 																// resets j
+	}
+	xytofile(decay_time[w], tmpstr)											// writes decay_time vector to the output file
+	tfil.close()															// closes the file.
+}
+
+proc changel() {															// procedure for moving the stimulation point down the dendrite, input location is based on counter "j" 
+	for i = 0,(num_d_step-1) {												// NEURON doesn't accept point processes at location "1" - this for loop places the the input in the most distal segment if j=1
+		if (j>=1){
+			j=0.999
+		}
+		
+		syn_gaba.loc(j+0.00001)												// sets dendritic input location based on the loop
+		tmp.record(&voltage_clamp.i)										// record the current applied by voltage_clamp to a temporary file (tmp)
+		initialize()														// initialize the individual simulation
+		integrate()															// run the individual simulation
+		
+		j=j+(1/num_d_step)													// moves the axon based on the number of distance steps
+		
+		if (i==0) {
+			avgI.copy(tmp)  												// when the first simulation is run copy tmp to avgI
+		}else {										
+			avgI.add(tmp)													// for subsequent runs add tmp to avgI element by element
+		}
+		if (i== num_d_step-1) {						
+			avgI.div(num_d_step)											// ####on the last set of simluations run for each distance-loop, divide to get the average current response
+			iMax.x[z] = avgI.x[5000]										// ???
+			avgI.sub(iMax.x[z])												// subtract the holding current from the overall current injected by voltage_clamp
+			avgI.line(distdrop,diststep)									// plots current-response to graph
+			iMax.x[z] = avgI.max(100,12000)									// sets iMax for this loop to the peak current amplitude between point 100 and 12000
+			avgI.div(iMax.x[z])												// normalizes to peak
+			tMax.x[z] = avgI.max_ind()										// makes note of data point where the peak occurs
+			avgI.remove(0,tMax.x[z])										// removes all points before the peak of the EPSC
+			it50.x[z] = avgI.indwhere("<=", 0.5)							// it50 for this loop is set to the first value where the the decays to 50% or less
+			t50.x[z] = it50.x[z]*0.025										// it50 is scaled by tstep to give the time in ms, which is recorded as the t50
+			avgI.resize(0)													// resizes avgI to 0 to clear all values for next loop
+		}
+	}
+}
+
+proc gsteplabel() {
+	sprint(taustepname, "The t50 for tau_d =\t%g", $1)						// writes the tau d in the first line of the file
+}
+
+proc xytofile() { local b													//Procedure to write the t50 and peak amplitude of the ipsc to two separate
+	w=0
+	print "writing to ", $s2												// notifies when writing to file
+	for w=0,num_g_step-1 {													// writes the gstep and wGaba at the beginning of the file
+		if (w==0){gsteplabel(wGaba)
+		tfil.printf("\n%s\n", taustepname)
+		}
+		for b=0,$o1.size()-1 {
+		tfil.printf("%g\n", decay_time[w].x[b])
+		}
+	}
+	for w=0,num_g_step-1 {
+		if (w==0){gsteplabel(wGaba)
+		tfil.printf("\nAmplitude\n", taustepname)							// prints the peak amplitude of the IPSC to the file
+		}
+		for b=0,$o1.size()-1 {
+		tfil.printf("%g\n", maxI[w].x[b])
+		}
+	}
+}

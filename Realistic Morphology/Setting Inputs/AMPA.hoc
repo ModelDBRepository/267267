@@ -1,0 +1,332 @@
+// Maurice Petroccine, SUNY Albany (mpetroccione@albany.edu)
+// Last updated on 11/29/2021
+
+// This code applies single excitatory or inhibitory inputs onto the dendrites of a neuron model reconstructed from a biocytin filled MSN.
+// It reports the number peak amplitude and t50 of the E/IPSC meaured at the soma.
+// A simulation is run for an input placed at a random dendritic location while systematically varying the weight and tau of the AMPA input.
+// A number of repetitions with different input locations is then performed.
+// The timing of the inputs is generated prior to running this code (see premade.hoc)
+// Time step: 0.025 ms
+// Window duration: 50 ms
+// to run type go("FileNameGoesHere") where you substitute what you want to name the file for FileNameGoesHere
+// File will appear in the same folder as the hoc file after it is done (make sure simulation is finished before opening)
+// Necessary files needed to run: 
+load_file ("nrngui.hoc")
+load_file("import3d.hoc")
+load_file ("ranstream.hoc")
+
+model_type = 1															// choose whether the model should be WT (1) or KO (2)
+dt = 0.025																// time step of integration
+tstop = 1050															// ms, each simulation stops after it reaches 1050 ms
+repetitions = 2															// number of simulations for each frequncy pairing to run
+strdef preface, dirstr
+preface = "."
+sprint(dirstr, "%s/all_tau_vecs.hoc", preface)
+xopen(dirstr)
+num_g_step = 2 															// the number of steps to increment the 
+num_d_step = 2															// the number of points along the axon
+wAMPA = 1000															// the weight of the AMPA input
+
+/***** TOPOLOGY *****/
+strdef cellToLoad
+	{
+		cellToLoad = "WT.swc"											// choose the cell to load
+	}
+	
+begintemplate Cell														// This code is based on the implementation of http://www.neuron.yale.edu/phpbb/viewtopic.php?f=13&t=2272; 
+	
+public soma, axon, dend, apic											// create dummy cell to facilitate importing  cell - will be overwritten
+create soma[1],axon[1],dend[1],apic[1]
+public all,somatic,axonal,basal,apical       
+objref all,somatic,axonal,basal,apical
+	
+proc init() {
+	all = new SectionList()
+	somatic = new SectionList()
+	axonal = new SectionList()
+	basal = new SectionList()
+	apical = new SectionList()
+}
+	
+endtemplate Cell
+
+obfunc mkcell() { localobj import,morph,cell							// Load the cell. $s1 is the morphology name On exit, the return object is a Cell instance with the morphology specified by the $s1 file
+	cell = new Cell()
+	morph = new Import3d_SWC_read()
+	morph.input($s1)
+	import = new Import3d_GUI(morph,0)
+	execute("forall delete_section()",cell)
+	import.instantiate(cell)
+	return cell
+}
+	
+objref cell
+{
+	cell = mkcell(cellToLoad)
+}
+
+celsius = 23															// experiments were performed at room temperature
+
+forall if (issection(".*soma.*")) {										// insert conductances into all somatic sections
+    print secname()														// Cs+ based internal solution - K+ conductances are removed
+	insert caL
+		 pbar_caL = 0.0001
+	insert caL13
+		pcaLbar_caL13 = 0.0001
+//	insert kas
+//		gkbar_kas = 0.00025
+//	insert kir
+//		gkbar_kir = 0.00025
+//		qfact_kir = 1
+//	insert krp
+//		gkbar_krp = 0.002
+	insert nap
+		gnabar_nap = 0.0001325
+	insert caldyn
+	insert na3
+		gbar_na3 = 0.035
+//	insert kdr
+//		gkdrbar_kdr = 0.03
+	insert cadyn
+//	insert pas	
+//		g_pas = 0.95e-4
+//		e_pas = -65
+	celsius = 23
+//	ek = -80	
+	ena = 65
+	ecal = 118
+	Ra = 100																// Ohm-cm
+	cm = 1																	// uF/cm2	
+}		
+
+forall if (issection(".*dend.*")) {											// insert conductances into all dendritic sections
+    print secname()
+//	insert kdr
+//		gkdrbar_kdr = 0.003
+	insert caL
+		 pbar_caL = 1e-5
+	insert caL13
+		pcaLbar_caL13 = 1e-5
+//	insert kas
+//		gkbar_kas = 0.000025
+//	insert kir
+//		gkbar_kir = 0.00025
+//		qfact_kir = 1
+//	insert krp
+//		gkbar_krp =  0.0002
+//	insert pas
+//		g_pas = 0.95e-4
+//		e_pas = -65
+//	ek = -80
+	ecal =118
+	celsius = 23
+	Ra = 100																// Ohm-cm
+	cm = 2																	// uF/cm2, increased cm to account for spines 
+}
+
+cai0_ca_ion = 0.001															// mM, Churchill 1998
+cao0_ca_ion = 1.2															// mM, Ca2+ concentration in external solution
+cali0_cal_ion = 0.001														// mM, Churchill 1998
+calo0_cal_ion = 1.2															// mM, Ca2+ concentration in external solution
+CAINF = 1e-5																// mM, steady state intracell ca conc.
+TAUR = 43																	// ms, time const of ca diffusion - Jackson 2003
+CA_DRIVE = 10000
+CA_PUMP = 0.02
+ 
+proc set_cainf() {	NEW_CAINF = $1											// Ca2+ dynamics, from Mattioni
+	nCA_INF = NEW_CAINF
+	forall if (ismembrane("cadyn")) {cainf_cadyn = NEW_CAINF}
+	forall if (ismembrane("caldyn")) {cainf_caldyn = NEW_CAINF}
+}
+proc set_taur() {	NEW_TAUR = $1
+	nCA_TAUR = NEW_TAUR
+	forall if (ismembrane("cadyn")) {taur_cadyn = NEW_TAUR}
+	forall if (ismembrane("caldyn")) {taur_caldyn = NEW_TAUR}
+}
+proc set_cadrive() { 	NEW_DRIVE = $1
+	nCA_DRIVE = NEW_DRIVE
+	forall if (ismembrane("cadyn")) {drive_cadyn = NEW_DRIVE}
+	forall if (ismembrane("caldyn")) {drive_caldyn = NEW_DRIVE}
+}
+proc set_pump() {	NEW_PUMP = $1
+	nCA_PUMP = NEW_PUMP
+	forall if (ismembrane("cadyn")) {pump_cadyn = NEW_PUMP}
+	forall if (ismembrane("caldyn")) {pump_caldyn = NEW_PUMP}
+}
+
+celsius = 23																// recordings took place at room temperature
+ena = 65																	// sodium reversal potential
+//ek = -80																	// potassium reversal potential
+v_init = -70																// initial voltage
+
+/***** INSTRUMENTATION *****/
+
+objref voltage_clamp														// define volatage clamp
+Cell[0].soma[0] voltage_clamp = new Voltage_Clamp(0.5)	 					// place voltage clamp in the soma	{voltage_clamp.dur1 = 1000 												// ms, clamp duration
+	{voltage_clamp.dur1 = 1000 												// ms, clamp duration
+	voltage_clamp.amp1= -70													// mV, holding potential
+	voltage_clamp.rs= 0.001													// Mohm???, series resistance of voltage clamp
+} 
+
+objref syn_ampa, ns
+objref r2, vec																// creates objects for assigning random placement of the input location
+r2 = new Random(11021986)							
+vec = new Vector(1000)
+
+proc setlocation() { 														// procedure for generating a random location for the inputs 
+	r2 = new Random(11021986*(repetitions+z))								// change the seed of the RNG for each run
+	r2.discunif(0,62)														// generate values between 1 and 80 with a uniform distribution
+	vec.setrand(r2)
+	Cell[0].dend[vec.x[i]] syn_ampa = new AMPA(0.5)
+	print syn_ampa.get_loc()
+	print secname()
+}
+
+/***** SIM CONTROL *****/									
+Cell[0].dend[3] syn_ampa = new AMPA(0.5)	
+objref  recI																// Creates vector object, records I at the soma
+	recI = new Vector()
+	recI.record(&voltage_clamp.i)
+
+objref iMin, tMin, iChange, it50, t50										// creates vectors to track:
+	t50 = new Vector (101,0)												// t50	
+	it50 = new Vector (101,0)												// holding current at the time of the t50
+	iMin = new Vector(101,0)												// peak epsc amplitude (includes holding current)
+	tMin = new Vector(101,0)												// the time of the epsc peak 
+	iChange = new Vector(101,0)												// the difference between the holding current and the peak epsc amplitude
+	
+objref diststep										 
+	diststep = new Vector(40000)					
+	diststep.indgen(0,0.025)						 
+
+objref distdrop																// creates a new graph - later used to plot V vs Dist
+	distdrop = new Graph()
+	distdrop.size(0,200,-1,0)												
+	distdrop.exec_menu("Keep Lines")				
+
+objref decay_time [num_g_step]												// creates decay_time
+objref minI [num_g_step]													// creates minI
+
+objref tfil																	// creates a new file for storing the output data
+	tfil = new File()
+objref nc[num_g_step]
+strdef tmpstr
+strdef gstepname
+strdef taustepname
+ns = new NetStim(0.5)														// creates a netstim to trigger an input that starts at 50 ms
+		ns.interval = 1
+		ns.start = 50
+		ns.noise = 0
+		ns.number = 1				 
+
+objref avgI, tmp										
+avgI = new Vector() 														// discard whatever is already in avg
+tmp = new Vector()
+
+objref tvec, tvec2, nil
+objref  tvec, fvec
+
+fvec = new File()															// object for opening pre-generated lists of input times
+tvec = new Vector()															// vector for transfering excitatory stimulation times
+tvec2 = new Vector ()														// vector for transfering ihibitory stimulation times
+
+objref g																	// create a new graph that displays the voltage at the soma 
+g = new Graph()
+addplot(g,0)
+g.exec_menu("Keep Lines")
+g.size(0,2050,-80,50)
+g.addvar("Cell[0].soma[0].v(0.5)", 1, 1, 0.6, 0.9, 2)
+
+objref g2																	// creates a new graph that plots the holding current
+	g2 = new Graph()
+	addplot(g2,1)
+	g2.exec_menu("Keep Lines")
+	g2.size(0,1000,-80,40)
+	g2.addvar("voltage_clamp.i")
+
+proc initialize() {															// Sets model to initial state (time, voltage)
+	t = 0
+	finitialize(v_init)
+	fcurrent()
+}
+proc integrate() {															// fadvance advances the simulation 
+	//g.begin()																// g.plot(t) updates the graph in real time
+	while (t<tstop) {
+		fadvance()
+		//g.plot(t)
+		g2.plot(t)
+	}	
+	//g.flush()
+	g2.flush()
+}
+proc changel() {															// procedure for moving the stimulation  to another point on the dendrite, input location is based on counter "j" 
+	for i = 0,(num_d_step-1) {												// NEURON doesn't accept point processes at location "1" - this for loop places the the input in the most distal segment if j=1
+		tmp.record(&voltage_clamp.i)										// record the current applied by voltage_clamp to a temporary file (tmp)
+		initialize()														// initialize the individual simulation
+		integrate()															// run the individual simulation
+		if (i==0) {
+			avgI.copy(tmp)  // copy tmp to avg								// when the first simulation is run copy tmp to avgI
+		}else {														
+			avgI.add(tmp)													// for subsequent runs add tmp to avgI element by element
+		}
+		if (i== num_d_step-1) {						
+			avgI.div(num_d_step)											// on the last set of simluations run for each distance-loop, divide to get the average current response
+			iMin.x[z] = avgI.x[5000]										//
+			avgI.sub(iMin.x[z])												// subtract the holding current from the overall current injected by voltage_clamp
+			avgI.line(distdrop,diststep)									// plots current-response to graph
+			iMin.x[z] = avgI.min(100,12000)									// sets iMin for this loop to the peak current amplitude between point 100 and 12000
+			avgI.div(iMin.x[z])												// normalizes to peak
+			tMin.x[z] = avgI.max_ind()										// makes note of data point where the peak occurs
+			avgI.remove(0,tMin.x[z])										// removes all points before the peak of the epsc
+			it50.x[z] = avgI.indwhere("<=", 0.5)							// it50 for this loop is set to the first value where the the decays to 50% or less
+			t50.x[z] = it50.x[z]*0.025										// it50 is scaled by tstep to give the time in ms, which is recorded as the t50
+			avgI.resize(0)													// resizes avgI to 0 to clear all values for next loop
+		}
+	}
+}
+proc go() {																	// the run command - note: does not work without have the access set to the dendrite		
+	sprint(tmpstr, "%s.dat", $s1)											// creates a string for the output file name
+	tfil.wopen(tmpstr)														// opens that file 
+	for z = 0,(num_g_step-1) {												// runs simulations for the num_g_steps
+		decay_time[z] = new Vector()										// creating a string to name a file
+		minI[z] = new Vector()	
+		tstop = 1050+ z*10													// simulation stops after 1050 ms (10 ms additionally added on per loop)
+		tau_d_AMPA = 35.5 * ((z*0.05)+0.05)									// each loop tau for AMPA is incremented by 5% of it's initial value
+		setlocation()
+		nc[z] = new NetCon(ns, syn_ampa)	
+		nc[z].weight = 10.28*wAMPA											// 0.28 is WT, 0.235 for TBOA-WT, 0.2 for KO, Tau_d_AMPA is 35.5 for WT and 17 for KO
+		nc[z].delay = 100														// sets delay for input to be 140 msec (to allow voltage clamp to stabilize at +40 mV)
+		changel()									
+		decay_time[z].append(t50.x[z])										// appends t50 to decay_time vector at position z
+		minI[z].append(iMin.x[z])											// append iMin to minI vector at position z 
+		print z																// This prints an update every 100 loops - comment out to run faster simulations
+		j = 0 																// resets j
+	}
+	xytofile(decay_time[w], tmpstr)											// writes decay_time vector to the output file
+	tfil.close()															// closes the file.
+}
+
+proc xytofile() { local b													// procedure to write the t50 and peak amplitude of the epsc to two separate
+	w=0
+	print "writing to ", $s2												// notifies when writing to file
+	for w=0,num_g_step-1 {													// writes the gstep and wAMPA at the beginning of the file
+		if (w==0){gsteplabel(wAMPA)
+			tfil.printf("\n%s\n", taustepname)
+		}					
+		for b=0,$o1.size()-1 {
+			tfil.printf("%g\n", decay_time[w].x[b])
+		}
+	}	
+	for w=0,num_g_step-1 {
+		if (w==0){gsteplabel(wAMPA)
+			tfil.printf("\nAmplitude\n", taustepname)
+		}																	// prints the peak amplitude of the epsc to the file
+		for b=0,$o1.size()-1 {											
+			tfil.printf("%g\n", minI[w].x[b])
+		}
+	}
+}
+ 
+ proc gsteplabel (){														// writes the tau d in the first line of the file
+	sprint(taustepname, "The t50 for tau_d =\t%g", $1)	
+}
